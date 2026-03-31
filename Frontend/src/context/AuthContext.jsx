@@ -1,5 +1,6 @@
 import { createContext, useState, useContext, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { authAPI } from '../utils/api';
 
 const AuthContext = createContext(null);
 
@@ -16,9 +17,6 @@ export const AuthProvider = ({ children }) => {
   const [loading, setLoading] = useState(true);
   const navigate = useNavigate();
 
-  // API base URL - change this to your backend URL
-  const API_URL = 'http://0.0.0.0:8000';
-
   // Hydrate user on app load - always fetch fresh data from /api/auth/me if token exists
   useEffect(() => {
     const hydrateUser = async () => {
@@ -30,25 +28,10 @@ export const AuthProvider = ({ children }) => {
       }
 
       try {
-        const response = await fetch(`${API_URL}/api/auth/me`, {
-          headers: {
-            Authorization: `Bearer ${token}`,
-          },
-        });
-
-        if (response.ok) {
-          const data = await response.json();
-          setUser(data.user);
-          localStorage.setItem('user', JSON.stringify(data.user));
-        } else {
-          // 401 or other error - invalid/expired token
-          localStorage.removeItem('access_token');
-          localStorage.removeItem('user');
-          setUser(null);
-          navigate('/auth');
-        }
+        const data = await authAPI.getMe();
+        setUser(data.user);
+        localStorage.setItem('user', JSON.stringify(data.user));
       } catch (error) {
-        // Network error or server down - clear auth and redirect
         console.error('Failed to fetch user info:', error);
         localStorage.removeItem('access_token');
         localStorage.removeItem('user');
@@ -63,21 +46,8 @@ export const AuthProvider = ({ children }) => {
   }, [navigate]);
 
   const login = async (identifier, password) => {
-    const response = await fetch(`${API_URL}/api/auth/login`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ identifier, password }),
-    });
+    const data = await authAPI.login(identifier, password);
 
-    const data = await response.json();
-
-    if (!response.ok) {
-      throw new Error(data.message || 'Login failed');
-    }
-
-    // Save token and user data
     localStorage.setItem('access_token', data.access_token);
     localStorage.setItem('user', JSON.stringify(data.user));
     setUser(data.user);
@@ -86,21 +56,8 @@ export const AuthProvider = ({ children }) => {
   };
 
   const register = async (userData) => {
-    const response = await fetch(`${API_URL}/api/auth/register`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(userData),
-    });
+    const data = await authAPI.register(userData);
 
-    const data = await response.json();
-
-    if (!response.ok) {
-      throw new Error(data.message || 'Registration failed');
-    }
-
-    // Save token and user data
     localStorage.setItem('access_token', data.access_token);
     localStorage.setItem('user', JSON.stringify(data.user));
     setUser(data.user);
