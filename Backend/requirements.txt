@@ -1,9 +1,11 @@
-Flask
-Flask-CORS
-Flask-JWT-Extended
-Flask-SQLAlchemy
+fastapi
 groq
+PyJWT
 Pillow
 pandas
 pytesseract
 python-dotenv
+python-multipart
+SQLAlchemy
+uvicorn
+Werkzeug

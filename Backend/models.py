@@ -61,11 +61,11 @@ class TaxFilingJob(db.Model):
         onupdate=func.now(),
     )
 
-    user = db.relationship("User", backref=db.backref("tax_filing_jobs", lazy=True))
+    user = db.relationship("User", backref=db.backref("tax_filing_jobs", lazy="select"))
     documents = db.relationship(
         "TaxDocumentUpload",
         backref="job",
-        lazy=True,
+        lazy="select",
         cascade="all, delete-orphan",
         order_by="TaxDocumentUpload.id.asc()",
     )

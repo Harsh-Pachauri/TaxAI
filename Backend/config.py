@@ -19,6 +19,7 @@ def _env_bool(name: str, default: bool) -> bool:
 class Config:
     SECRET_KEY = os.getenv("SECRET_KEY", "change-this-secret-key")
     JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "change-this-jwt-secret-key")
+    JWT_ACCESS_TOKEN_EXPIRES_MINUTES = int(os.getenv("JWT_ACCESS_TOKEN_EXPIRES_MINUTES", "15"))
     SQLALCHEMY_DATABASE_URI = os.getenv("DATABASE_URL", "sqlite:///taxai.db")
     SQLALCHEMY_TRACK_MODIFICATIONS = False
     GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")

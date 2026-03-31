@@ -4,14 +4,16 @@ import json
 import os
 from typing import Any
 
-from flask import Blueprint, current_app, jsonify, request, send_file
-from flask_jwt_extended import get_jwt_identity, jwt_required
+from fastapi import APIRouter, Depends, Request, UploadFile
+from fastapi.responses import FileResponse, JSONResponse
 
 from extensions import db
 from models import TaxFilingJob
-from services.pdf_export import save_itr_pdf
+from runtime import get_runtime_config
+from security import get_current_user_id
 from services.groq_ai import groq_status
 from services.image_ocr import IMAGE_EXTENSIONS, OcrConversionError, convert_image_to_csv_document
+from services.pdf_export import save_itr_pdf
 from services.portal_adapter import portal_adapter_capabilities
 from services.tax_assistant import analyze_tax_documents, answer_tax_question
 from services.tax_constants import DEFAULT_FINANCIAL_YEAR, SUPPORTED_DOCUMENTS
@@ -24,46 +26,40 @@ from services.tax_jobs import (
 )
 
 
-tax_bp = Blueprint("tax_assistant", __name__, url_prefix="/api/tax-assistant")
+tax_bp = APIRouter(prefix="/api/tax-assistant")
 
 
-def _error(message: str, status_code: int):
-    return jsonify({"message": message}), status_code
+def _error(message: str, status_code: int) -> JSONResponse:
+    return JSONResponse({"message": message}, status_code=status_code)
 
 
 @tax_bp.get("/options")
 def options():
-    return jsonify(
-        {
-            "profile_types": ["individual", "small_business"],
-            "regimes": ["old", "new", "auto"],
-            "default_financial_year": DEFAULT_FINANCIAL_YEAR,
-            "supported_documents": SUPPORTED_DOCUMENTS,
-            "job_statuses": sorted(JOB_STATUSES),
-            "portal_adapter": portal_adapter_capabilities(),
-            "ai_provider": groq_status(),
-        }
-    )
+    return {
+        "profile_types": ["individual", "small_business"],
+        "regimes": ["old", "new", "auto"],
+        "default_financial_year": DEFAULT_FINANCIAL_YEAR,
+        "supported_documents": SUPPORTED_DOCUMENTS,
+        "job_statuses": sorted(JOB_STATUSES),
+        "portal_adapter": portal_adapter_capabilities(),
+        "ai_provider": groq_status(),
+    }
 
 
-def _current_user_id() -> int:
-    return int(get_jwt_identity())
-
-
-def _get_job_or_404(job_id: str) -> TaxFilingJob | None:
-    job = TaxFilingJob.query.filter_by(job_id=job_id, user_id=_current_user_id()).first()
+def _get_job_or_404(job_id: str, current_user_id: int) -> TaxFilingJob | None:
+    job = TaxFilingJob.query.filter_by(job_id=job_id, user_id=current_user_id).first()
     if job is None:
         return None
     return job
 
 
-def _convert_uploaded_file(document_type: str, file_storage: Any) -> dict[str, str]:
+async def _convert_uploaded_file(document_type: str, file_storage: UploadFile) -> dict[str, str]:
     filename = str(file_storage.filename or "uploaded").strip()
     if not filename:
         raise ValueError("Uploaded file must have a filename.")
 
     lower_name = filename.lower()
-    content = file_storage.read()
+    content = await file_storage.read()
 
     if lower_name.endswith(".csv"):
         try:
@@ -92,10 +88,19 @@ def _convert_uploaded_file(document_type: str, file_storage: Any) -> dict[str, s
     )
 
 
-def _parse_documents_from_request() -> tuple[list[dict[str, str]], str | None]:
-    if request.files:
-        uploaded_files = request.files.getlist("files")
-        document_types = request.form.getlist("document_types")
+async def _json_payload(request: Request) -> dict[str, Any]:
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    return payload if isinstance(payload, dict) else {}
+
+
+async def _parse_documents_from_request(request: Request) -> tuple[list[dict[str, str]], str | None]:
+    if request.headers.get("content-type", "").lower().startswith("multipart/form-data"):
+        form = await request.form()
+        uploaded_files = [item for item in form.getlist("files") if hasattr(item, "filename") and hasattr(item, "read")]
+        document_types = [str(item) for item in form.getlist("document_types")]
         if not uploaded_files:
             return [], "At least one CSV or image file must be uploaded under the files field."
         if len(document_types) != len(uploaded_files):
@@ -104,12 +109,12 @@ def _parse_documents_from_request() -> tuple[list[dict[str, str]], str | None]:
         documents: list[dict[str, str]] = []
         for document_type, file_storage in zip(document_types, uploaded_files):
             try:
-                documents.append(_convert_uploaded_file(document_type, file_storage))
+                documents.append(await _convert_uploaded_file(document_type, file_storage))
             except ValueError as exc:
                 return [], str(exc)
         return documents, None
 
-    payload: dict[str, Any] = request.get_json(silent=True) or {}
+    payload = await _json_payload(request)
     documents = payload.get("documents", [])
     if not isinstance(documents, list) or not documents:
         return [], "documents must be a non-empty list."
@@ -117,9 +122,9 @@ def _parse_documents_from_request() -> tuple[list[dict[str, str]], str | None]:
 
 
 @tax_bp.post("/analyze")
-@jwt_required()
-def analyze():
-    payload: dict[str, Any] = request.get_json(silent=True) or {}
+async def analyze(request: Request, current_user_id: int = Depends(get_current_user_id)):
+    del current_user_id
+    payload = await _json_payload(request)
     profile_type = str(payload.get("profile_type", "")).strip().lower()
     regime = str(payload.get("regime", "new")).strip().lower()
     financial_year = str(payload.get("financial_year", DEFAULT_FINANCIAL_YEAR)).strip()
@@ -142,17 +147,18 @@ def analyze():
     except ValueError as exc:
         return _error(str(exc), 400)
 
-    return jsonify(result), 200 if result.get("status") == "success" else 422
+    return JSONResponse(result, status_code=200 if result.get("status") == "success" else 422)
 
 
 @tax_bp.post("/analyze-files")
-@jwt_required()
-def analyze_files():
-    profile_type = str(request.form.get("profile_type", "")).strip().lower()
-    regime = str(request.form.get("regime", "new")).strip().lower()
-    financial_year = str(request.form.get("financial_year", DEFAULT_FINANCIAL_YEAR)).strip()
-    uploaded_files = request.files.getlist("files")
-    document_types = request.form.getlist("document_types")
+async def analyze_files(request: Request, current_user_id: int = Depends(get_current_user_id)):
+    del current_user_id
+    form = await request.form()
+    profile_type = str(form.get("profile_type", "")).strip().lower()
+    regime = str(form.get("regime", "new")).strip().lower()
+    financial_year = str(form.get("financial_year", DEFAULT_FINANCIAL_YEAR)).strip()
+    uploaded_files = [item for item in form.getlist("files") if hasattr(item, "filename") and hasattr(item, "read")]
+    document_types = [str(item) for item in form.getlist("document_types")]
 
     if not profile_type:
         return _error("profile_type is required.", 400)
@@ -164,15 +170,15 @@ def analyze_files():
     documents: list[dict[str, str]] = []
     for document_type, file_storage in zip(document_types, uploaded_files):
         try:
-            documents.append(_convert_uploaded_file(document_type, file_storage))
+            documents.append(await _convert_uploaded_file(document_type, file_storage))
         except ValueError as exc:
             return _error(str(exc), 400)
 
     tax_profile: dict[str, Any] = {}
-    raw_tax_profile = request.form.get("tax_profile")
+    raw_tax_profile = form.get("tax_profile")
     if raw_tax_profile:
         try:
-            tax_profile = json.loads(raw_tax_profile)
+            tax_profile = json.loads(str(raw_tax_profile))
         except json.JSONDecodeError:
             return _error("tax_profile must be valid JSON.", 400)
 
@@ -187,26 +193,25 @@ def analyze_files():
     except ValueError as exc:
         return _error(str(exc), 400)
 
-    return jsonify(result), 200 if result.get("status") == "success" else 422
+    return JSONResponse(result, status_code=200 if result.get("status") == "success" else 422)
 
 
 @tax_bp.post("/ask")
-@jwt_required()
-def ask():
-    payload: dict[str, Any] = request.get_json(silent=True) or {}
+async def ask(request: Request, current_user_id: int = Depends(get_current_user_id)):
+    del current_user_id
+    payload = await _json_payload(request)
     question = str(payload.get("question", "")).strip()
     analysis = payload.get("analysis")
 
     if not isinstance(analysis, dict):
         return _error("analysis must be the JSON result returned by an analyze endpoint.", 400)
 
-    return jsonify(answer_tax_question(analysis, question))
+    return answer_tax_question(analysis, question)
 
 
 @tax_bp.post("/jobs")
-@jwt_required()
-def create_job():
-    payload: dict[str, Any] = request.get_json(silent=True) or {}
+async def create_job(request: Request, current_user_id: int = Depends(get_current_user_id)):
+    payload = await _json_payload(request)
     profile_type = str(payload.get("profile_type", "individual")).strip().lower()
     regime_preference = str(payload.get("regime", "auto")).strip().lower()
     financial_year = str(payload.get("financial_year", DEFAULT_FINANCIAL_YEAR)).strip()
@@ -219,52 +224,50 @@ def create_job():
         return _error("regime must be 'old', 'new', or 'auto'.", 400)
 
     job = create_filing_job(
-        user_id=_current_user_id(),
+        user_id=current_user_id,
         profile_type=profile_type,
         regime_preference=regime_preference,
         financial_year=financial_year,
         taxpayer_profile=taxpayer_profile if isinstance(taxpayer_profile, dict) else {},
         tax_profile=tax_profile if isinstance(tax_profile, dict) else {},
     )
-    return jsonify({"status": "success", "job": job.to_dict()}), 201
+    return JSONResponse({"status": "success", "job": job.to_dict()}, status_code=201)
 
 
 @tax_bp.get("/jobs")
-@jwt_required()
-def list_jobs():
-    jobs = TaxFilingJob.query.filter_by(user_id=_current_user_id()).order_by(TaxFilingJob.id.desc()).all()
-    return jsonify(
-        {
-            "jobs": [
-                {
-                    **job.to_dict(),
-                    "documents": [document.to_dict() for document in job.documents],
-                }
-                for job in jobs
-            ]
-        }
-    )
+def list_jobs(current_user_id: int = Depends(get_current_user_id)):
+    jobs = TaxFilingJob.query.filter_by(user_id=current_user_id).order_by(TaxFilingJob.id.desc()).all()
+    return {
+        "jobs": [
+            {
+                **job.to_dict(),
+                "documents": [document.to_dict() for document in job.documents],
+            }
+            for job in jobs
+        ]
+    }
 
 
-@tax_bp.post("/jobs/<job_id>/documents")
-@jwt_required()
-def upload_job_documents(job_id: str):
-    job = _get_job_or_404(job_id)
+@tax_bp.post("/jobs/{job_id}/documents")
+async def upload_job_documents(job_id: str, request: Request, current_user_id: int = Depends(get_current_user_id)):
+    job = _get_job_or_404(job_id, current_user_id)
     if job is None:
         return _error("Job not found.", 404)
 
-    documents, error = _parse_documents_from_request()
+    documents, error = await _parse_documents_from_request(request)
     if error:
         return _error(error, 400)
 
     uploads = attach_documents_to_job(job, documents)
-    return jsonify({"status": "success", "job": job.to_dict(), "documents": [upload.to_dict() for upload in uploads]}), 201
+    return JSONResponse(
+        {"status": "success", "job": job.to_dict(), "documents": [upload.to_dict() for upload in uploads]},
+        status_code=201,
+    )
 
 
-@tax_bp.post("/jobs/<job_id>/process")
-@jwt_required()
-def process_job(job_id: str):
-    job = _get_job_or_404(job_id)
+@tax_bp.post("/jobs/{job_id}/process")
+def process_job(job_id: str, current_user_id: int = Depends(get_current_user_id)):
+    job = _get_job_or_404(job_id, current_user_id)
     if job is None:
         return _error("Job not found.", 404)
     if not job.documents:
@@ -272,13 +275,12 @@ def process_job(job_id: str):
 
     result = process_filing_job(job)
     status_code = 200 if result.get("status") == "success" else 422
-    return jsonify(result), status_code
+    return JSONResponse(result, status_code=status_code)
 
 
-@tax_bp.get("/jobs/<job_id>/review")
-@jwt_required()
-def review_job(job_id: str):
-    job = _get_job_or_404(job_id)
+@tax_bp.get("/jobs/{job_id}/review")
+def review_job(job_id: str, current_user_id: int = Depends(get_current_user_id)):
+    job = _get_job_or_404(job_id, current_user_id)
     if job is None:
         return _error("Job not found.", 404)
     if not job.processing_result:
@@ -289,29 +291,27 @@ def review_job(job_id: str):
         **job.to_dict(),
         "documents": [document.to_dict() for document in job.documents],
     }
-    return jsonify(response)
+    return response
 
 
-@tax_bp.post("/jobs/<job_id>/approve")
-@jwt_required()
-def approve_job(job_id: str):
-    job = _get_job_or_404(job_id)
+@tax_bp.post("/jobs/{job_id}/approve")
+async def approve_job(job_id: str, request: Request, current_user_id: int = Depends(get_current_user_id)):
+    job = _get_job_or_404(job_id, current_user_id)
     if job is None:
         return _error("Job not found.", 404)
 
-    payload: dict[str, Any] = request.get_json(silent=True) or {}
+    payload = await _json_payload(request)
     try:
         result = approve_filing_job(job, payload)
     except ValueError as exc:
         db.session.rollback()
         return _error(str(exc), 400)
-    return jsonify(result)
+    return result
 
 
-@tax_bp.get("/jobs/<job_id>/export/itr-pdf")
-@jwt_required()
-def export_itr_pdf(job_id: str):
-    job = _get_job_or_404(job_id)
+@tax_bp.get("/jobs/{job_id}/export/itr-pdf")
+def export_itr_pdf(job_id: str, current_user_id: int = Depends(get_current_user_id)):
+    job = _get_job_or_404(job_id, current_user_id)
     if job is None:
         return _error("Job not found.", 404)
     if job.status not in {"approved", "exported"}:
@@ -326,8 +326,9 @@ def export_itr_pdf(job_id: str):
     pdf_export = result.get("pdf_export", {})
     pdf_path = pdf_export.get("path")
     if not pdf_path or not os.path.exists(pdf_path):
+        config = get_runtime_config()
         pdf_path = save_itr_pdf(
-            current_app.config["PDF_EXPORT_DIR"],
+            config.PDF_EXPORT_DIR,
             f"itr_draft_{job.job_id}.pdf",
             draft_return,
             review_state,
@@ -341,9 +342,8 @@ def export_itr_pdf(job_id: str):
 
     job.status = "exported"
     db.session.commit()
-    return send_file(
-        pdf_path,
-        mimetype="application/pdf",
-        as_attachment=True,
-        download_name=os.path.basename(pdf_path),
+    return FileResponse(
+        path=pdf_path,
+        media_type="application/pdf",
+        filename=os.path.basename(pdf_path),
     )

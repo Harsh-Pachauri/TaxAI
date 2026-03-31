@@ -5,9 +5,9 @@ import os
 from io import BytesIO
 from typing import Any
 
-from flask import current_app
 from PIL import Image, ImageOps
 
+from runtime import get_runtime_config
 from services.document_ingestion import DocumentValidationError, parse_document
 from services.groq_ai import extract_csv_from_ocr_text
 from services.tax_constants import SUPPORTED_DOCUMENTS
@@ -35,7 +35,8 @@ def _extract_text_from_image(image_bytes: bytes) -> str:
             "pytesseract is not installed. Install it and ensure the Tesseract engine is available."
         )
 
-    tesseract_cmd = str(current_app.config.get("TESSERACT_CMD", "")).strip()
+    config = get_runtime_config()
+    tesseract_cmd = str(getattr(config, "TESSERACT_CMD", "")).strip()
     if tesseract_cmd:
         pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
 

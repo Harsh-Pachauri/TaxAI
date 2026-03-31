@@ -4,12 +4,12 @@ import json
 from typing import Any
 from urllib import error, request
 
-from flask import current_app
-
 try:
     from groq import Groq
 except ImportError:  # pragma: no cover
     Groq = None
+
+from runtime import get_runtime_config
 
 
 ALLOWED_BANK_INCOME_LABELS = {
@@ -28,14 +28,15 @@ ALLOWED_BANK_INCOME_LABELS = {
 
 
 def groq_status() -> dict[str, Any]:
-    api_key = str(current_app.config.get("GROQ_API_KEY", "")).strip()
-    enabled = bool(current_app.config.get("GROQ_ENABLED"))
+    config = get_runtime_config()
+    api_key = str(getattr(config, "GROQ_API_KEY", "")).strip()
+    enabled = bool(getattr(config, "GROQ_ENABLED", False))
     return {
         "enabled": enabled,
         "has_api_key": bool(api_key),
         "sdk_installed": Groq is not None,
         "transport": "sdk" if Groq is not None else "http",
-        "model": current_app.config.get("GROQ_MODEL"),
+        "model": getattr(config, "GROQ_MODEL", None),
     }
 
 
@@ -62,14 +63,15 @@ def _extract_json_object(raw_text: str) -> dict[str, Any]:
 
 
 def _sdk_completion(messages: list[dict[str, str]]) -> str:
-    client = Groq(api_key=current_app.config["GROQ_API_KEY"])
+    config = get_runtime_config()
+    client = Groq(api_key=config.GROQ_API_KEY)
     completion = client.chat.completions.create(
-        model=current_app.config["GROQ_MODEL"],
+        model=config.GROQ_MODEL,
         messages=messages,
         temperature=0,
-        max_completion_tokens=current_app.config["GROQ_MAX_COMPLETION_TOKENS"],
+        max_completion_tokens=config.GROQ_MAX_COMPLETION_TOKENS,
         top_p=1,
-        reasoning_effort=current_app.config["GROQ_REASONING_EFFORT"],
+        reasoning_effort=config.GROQ_REASONING_EFFORT,
         stream=False,
         stop=None,
     )
@@ -77,21 +79,22 @@ def _sdk_completion(messages: list[dict[str, str]]) -> str:
 
 
 def _http_completion(messages: list[dict[str, str]]) -> str:
+    config = get_runtime_config()
     payload = {
-        "model": current_app.config["GROQ_MODEL"],
+        "model": config.GROQ_MODEL,
         "messages": messages,
         "temperature": 0,
-        "max_completion_tokens": current_app.config["GROQ_MAX_COMPLETION_TOKENS"],
+        "max_completion_tokens": config.GROQ_MAX_COMPLETION_TOKENS,
         "top_p": 1,
-        "reasoning_effort": current_app.config["GROQ_REASONING_EFFORT"],
+        "reasoning_effort": config.GROQ_REASONING_EFFORT,
         "stream": False,
     }
     body = json.dumps(payload).encode("utf-8")
     req = request.Request(
-        current_app.config["GROQ_API_BASE_URL"],
+        config.GROQ_API_BASE_URL,
         data=body,
         headers={
-            "Authorization": f"Bearer {current_app.config['GROQ_API_KEY']}",
+            "Authorization": f"Bearer {config.GROQ_API_KEY}",
             "Content-Type": "application/json",
         },
         method="POST",
@@ -118,6 +121,7 @@ def classify_bank_income_rows(rows: list[dict[str, Any]]) -> dict[str, Any] | No
     if not groq_available() or not rows:
         return None
 
+    config = get_runtime_config()
     prompt_rows = [
         {
             "row_id": row["row_id"],
@@ -125,7 +129,7 @@ def classify_bank_income_rows(rows: list[dict[str, Any]]) -> dict[str, Any] | No
             "description": str(row.get("description", ""))[:120],
             "amount": row.get("amount", 0.0),
         }
-        for row in rows[: current_app.config["GROQ_BANK_ROWS_PER_CALL"]]
+        for row in rows[: config.GROQ_BANK_ROWS_PER_CALL]
     ]
     messages = [
         {
@@ -148,7 +152,7 @@ def classify_bank_income_rows(rows: list[dict[str, Any]]) -> dict[str, Any] | No
     if not content:
         return {
             "classifications": [],
-            "model": current_app.config["GROQ_MODEL"],
+            "model": config.GROQ_MODEL,
             "rows_sent": len(prompt_rows),
             "meta": {**groq_status(), **meta, "success": False},
         }
@@ -158,7 +162,7 @@ def classify_bank_income_rows(rows: list[dict[str, Any]]) -> dict[str, Any] | No
     except Exception as exc:  # pragma: no cover
         return {
             "classifications": [],
-            "model": current_app.config["GROQ_MODEL"],
+            "model": config.GROQ_MODEL,
             "rows_sent": len(prompt_rows),
             "meta": {**groq_status(), **meta, "success": False, "error": type(exc).__name__, "detail": str(exc)[:240]},
         }
@@ -179,7 +183,7 @@ def classify_bank_income_rows(rows: list[dict[str, Any]]) -> dict[str, Any] | No
 
     return {
         "classifications": valid_classifications,
-        "model": current_app.config["GROQ_MODEL"],
+        "model": config.GROQ_MODEL,
         "rows_sent": len(prompt_rows),
         "meta": {**groq_status(), **meta, "success": True},
     }
@@ -195,7 +199,8 @@ def extract_csv_from_ocr_text(
     if not groq_available() or not ocr_text.strip():
         return None
 
-    max_chars = int(current_app.config.get("GROQ_OCR_MAX_INPUT_CHARS", 12000))
+    config = get_runtime_config()
+    max_chars = int(getattr(config, "GROQ_OCR_MAX_INPUT_CHARS", 12000))
     trimmed_text = ocr_text.strip()[:max_chars]
     messages = [
         {
