@@ -26,6 +26,10 @@ class SQLAlchemy:
 
     def init_app(self, config: object) -> None:
         database_uri = str(getattr(config, "SQLALCHEMY_DATABASE_URI"))
+        if database_uri.startswith("postgres://"):
+            database_uri = database_uri.replace("postgres://", "postgresql+psycopg://", 1)
+        elif database_uri.startswith("postgresql://"):
+            database_uri = database_uri.replace("postgresql://", "postgresql+psycopg://", 1)
         connect_args = {"check_same_thread": False} if database_uri.startswith("sqlite") else {}
         self.engine = create_engine(database_uri, future=True, connect_args=connect_args)
         self.session.configure(bind=self.engine)

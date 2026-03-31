@@ -7,5 +7,6 @@ pytesseract
 python-dotenv
 python-multipart
 SQLAlchemy
+psycopg[binary]
 uvicorn
 Werkzeug
