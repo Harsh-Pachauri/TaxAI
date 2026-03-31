@@ -1,14 +1,26 @@
-// API base URL
-const API_BASE_URL = 'http://0.0.0.0:8000/api';
+const rawBaseUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
-// Helper function to get token from localStorage
+export const API_BASE_URL = rawBaseUrl.replace(/\/+$/, '');
+export const API_PREFIX = `${API_BASE_URL}/api`;
+
 const getToken = () => localStorage.getItem('access_token');
 
-// Auth API calls
+const parseJsonSafely = async (response) => {
+  const text = await response.text();
+  if (!text) {
+    return {};
+  }
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    return {};
+  }
+};
+
 export const authAPI = {
-  // Login
   async login(identifier, password) {
-    const response = await fetch(`${API_BASE_URL}/auth/login`, {
+    const response = await fetch(`${API_PREFIX}/auth/login`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -16,7 +28,7 @@ export const authAPI = {
       body: JSON.stringify({ identifier, password }),
     });
 
-    const data = await response.json();
+    const data = await parseJsonSafely(response);
 
     if (!response.ok) {
       throw new Error(data.message || 'Login failed');
@@ -25,9 +37,8 @@ export const authAPI = {
     return data;
   },
 
-  // Register
   async register(userData) {
-    const response = await fetch(`${API_BASE_URL}/auth/register`, {
+    const response = await fetch(`${API_PREFIX}/auth/register`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -35,7 +46,7 @@ export const authAPI = {
       body: JSON.stringify(userData),
     });
 
-    const data = await response.json();
+    const data = await parseJsonSafely(response);
 
     if (!response.ok) {
       throw new Error(data.message || 'Registration failed');
@@ -44,7 +55,6 @@ export const authAPI = {
     return data;
   },
 
-  // Get current user
   async getMe() {
     const token = getToken();
 
@@ -52,14 +62,13 @@ export const authAPI = {
       throw new Error('No authentication token found');
     }
 
-    const response = await fetch(`${API_BASE_URL}/auth/me`, {
+    const response = await fetch(`${API_PREFIX}/auth/me`, {
       headers: {
-        'Authorization': `Bearer ${token}`,
-        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
       },
     });
 
-    const data = await response.json();
+    const data = await parseJsonSafely(response);
 
     if (!response.ok) {
       throw new Error(data.message || 'Failed to fetch user data');
@@ -69,16 +78,18 @@ export const authAPI = {
   },
 };
 
-// Generic API helper with authentication
 export const apiCall = async (endpoint, options = {}) => {
   const token = getToken();
+  const isFormData = options.body instanceof FormData;
 
-  const defaultHeaders = {
-    'Content-Type': 'application/json',
-  };
+  const defaultHeaders = isFormData
+    ? {}
+    : {
+        'Content-Type': 'application/json',
+      };
 
   if (token) {
-    defaultHeaders['Authorization'] = `Bearer ${token}`;
+    defaultHeaders.Authorization = `Bearer ${token}`;
   }
 
   const config = {
@@ -89,8 +100,9 @@ export const apiCall = async (endpoint, options = {}) => {
     },
   };
 
-  const response = await fetch(`${API_BASE_URL}${endpoint}`, config);
-  const data = await response.json();
+  const normalizedEndpoint = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
+  const response = await fetch(`${API_PREFIX}${normalizedEndpoint}`, config);
+  const data = await parseJsonSafely(response);
 
   if (!response.ok) {
     throw new Error(data.message || 'API request failed');
